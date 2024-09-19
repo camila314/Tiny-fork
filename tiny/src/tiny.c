@@ -327,9 +327,6 @@ Tiny_Value Tiny_NewLightNative(void *ptr) {
 Tiny_Value Tiny_NewNative(Tiny_StateThread *thread, void *ptr, const Tiny_NativeProp *prop) {
     assert(thread && thread->state);
 
-    // Make sure thread is alive
-    assert(thread->pc >= 0);
-
     Tiny_Object *obj = NewObject(thread, TINY_VAL_NATIVE);
 
     obj->nat.addr = ptr;
@@ -519,18 +516,31 @@ void Tiny_InitThread(Tiny_StateThread *thread, const Tiny_State *state) {
     Tiny_InitThreadWithContext(thread, state, Tiny_DefaultContext);
 }
 
-static void AllocGlobals(Tiny_StateThread *thread) {
+static void RefreshGlobals(Tiny_StateThread *thread) {
     // If the global variables haven't been allocated yet,
-    // do that
-    if (!thread->globalVars) {
-        thread->globalVars =
-            TMalloc(&thread->ctx, sizeof(Tiny_Value) * thread->state->numGlobalVars);
-        memset(thread->globalVars, 0, sizeof(Tiny_Value) * thread->state->numGlobalVars);
+    // or if the number of global variables has changed,
+    // reallocate the global variables array
+    if (thread->numGlobalVars != thread->state->numGlobalVars) {
+        assert(thread->numGlobalVars < thread->state->numGlobalVars);
+
+        void* newGlobals = TMalloc(&thread->ctx, sizeof(Tiny_Value) * thread->state->numGlobalVars);
+
+        if (!thread->numGlobalVars) {
+            memset(newGlobals, 0, sizeof(Tiny_Value) * thread->state->numGlobalVars);
+        } else {
+            memcpy(newGlobals, thread->globalVars, sizeof(Tiny_Value) * thread->numGlobalVars);
+            memset((char*)newGlobals + sizeof(Tiny_Value) * thread->numGlobalVars, 0,
+                   sizeof(Tiny_Value) * (thread->state->numGlobalVars - thread->numGlobalVars));
+            TFree(&thread->ctx, thread->globalVars);
+        }
+
+        thread->globalVars = newGlobals;
+        thread->numGlobalVars = thread->state->numGlobalVars;
     }
 }
 
 void Tiny_StartThread(Tiny_StateThread *thread) {
-    AllocGlobals(thread);
+    RefreshGlobals(thread);
 
     // TODO: Eventually move to an actual entry point
     thread->pc = 0;
@@ -566,15 +576,15 @@ static void DoPushIndir(Tiny_StateThread *thread, uint8_t nargs);
 static void DoPush(Tiny_StateThread *thread, Tiny_Value value);
 
 Tiny_Value Tiny_GetGlobal(const Tiny_StateThread *thread, int globalIndex) {
-    assert(globalIndex >= 0 && globalIndex < thread->state->numGlobalVars);
+    assert(globalIndex >= 0 && globalIndex < thread->numGlobalVars);
     assert(thread->globalVars);
 
     return thread->globalVars[globalIndex];
 }
 
 void Tiny_SetGlobal(Tiny_StateThread *thread, int globalIndex, Tiny_Value value) {
-    assert(globalIndex >= 0 && globalIndex < thread->state->numGlobalVars);
-    assert(thread->globalVars);
+    RefreshGlobals(thread);
+    assert(globalIndex >= 0 && globalIndex < thread->numGlobalVars);
 
     thread->globalVars[globalIndex] = value;
 }
@@ -592,7 +602,7 @@ Tiny_Value Tiny_CallFunction(Tiny_StateThread *thread, int functionIndex, const 
 
     Tiny_Value retVal = thread->retVal;
 
-    AllocGlobals(thread);
+    RefreshGlobals(thread);
 
     for (int i = 0; i < count; ++i) {
         DoPush(thread, args[i]);
@@ -645,7 +655,7 @@ static void MarkAll(Tiny_StateThread *thread) {
 
     for (int i = 0; i < thread->sp; ++i) Tiny_ProtectFromGC(thread->stack[i]);
 
-    for (int i = 0; i < thread->state->numGlobalVars; ++i)
+    for (int i = 0; i < thread->numGlobalVars; ++i)
         Tiny_ProtectFromGC(thread->globalVars[i]);
 }
 
@@ -811,7 +821,7 @@ static Tiny_Symbol *ReferenceVariable(Tiny_State *state, const char *name) {
     return NULL;
 }
 
-static Tiny_Symbol *DeclareGlobalVar(Tiny_State *state, const char *name) {
+Tiny_Symbol *DeclareGlobalVar(Tiny_State *state, const char *name) {
     Tiny_Symbol *sym = ReferenceVariable(state, name);
 
     if (sym && (sym->type == TINY_SYM_GLOBAL || sym->type == TINY_SYM_CONST)) {
@@ -833,6 +843,14 @@ static Tiny_Symbol *DeclareGlobalVar(Tiny_State *state, const char *name) {
     state->numGlobalVars += 1;
 
     return newNode;
+}
+
+static Tiny_Symbol *GetTagFromName(Tiny_State *state, const char *name, bool declareStruct);
+
+int Tiny_BindGlobalVar(Tiny_State *state, const char *name, const char *type) {
+    Tiny_Symbol *sym = DeclareGlobalVar(state, name);
+    sym->var.tag = GetTagFromName(state, type, false);
+    return Tiny_GetGlobalIndex(state, name);
 }
 
 // This expects nargs to be known beforehand because arguments are
@@ -975,8 +993,6 @@ static void BindFunction(Tiny_State *state, const char *name, Tiny_Symbol **argT
 
     state->numForeignFunctions += 1;
 }
-
-static Tiny_Symbol *GetTagFromName(Tiny_State *state, const char *name, bool declareStruct);
 
 void Tiny_RegisterType(Tiny_State *state, const char *name) {
     Tiny_Symbol *s = GetTagFromName(state, name, false);
@@ -1147,6 +1163,7 @@ inline static bool ExecuteCycle(Tiny_StateThread *thread) {
     assert(thread && thread->state);
 
     if (thread->pc < 0) return false;
+    RefreshGlobals(thread);
 
     const Tiny_State *state = thread->state;
 

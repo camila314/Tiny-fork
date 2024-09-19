@@ -133,6 +133,7 @@ typedef struct Tiny_StateThread {
     int maxNumObjects;
 
     // Global vars are owned by each thread
+    int numGlobalVars;
     Tiny_Value *globalVars;
 
     int pc, fp, sp;
@@ -287,6 +288,11 @@ void Tiny_BindConstBool(Tiny_State *state, const char *name, bool b);
 void Tiny_BindConstInt(Tiny_State *state, const char *name, int i);
 void Tiny_BindConstFloat(Tiny_State *state, const char *name, float f);
 void Tiny_BindConstString(Tiny_State *state, const char *name, const char *value);
+
+// This is a global variable that can be accessed from anywhere in the Tiny code.
+// It is initialized to NULL.
+// Returns the index of the global variable
+int Tiny_BindGlobalVar(Tiny_State *state, const char *name, const char *type);
 
 Tiny_CompileResult Tiny_CompileString(Tiny_State *state, const char *name, const char *string);
 Tiny_CompileResult Tiny_CompileFile(Tiny_State *state, const char *filename);
